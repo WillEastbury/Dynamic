@@ -1,0 +1,22 @@
+{
+  "Id": "bootstrap",
+  "UserName": "bootstrap",
+  "Locked": false,
+  "ValidUntil": "2199-01-14T00:00:00Z",
+  "ValidFrom": "2199-01-14T00:00:00Z",
+  "FullName": "System Boot User",
+  "principalType": "Bootstrap",
+  "FailedLoginAttempts": 0,
+  "LastSuccessfulLogin": "0001-01-01T00:00:00",
+  "Salt": "QmFzZTY0U2FsdA==",
+  "PasswordHashes": [],
+  "MFAEmail": "bootstrap@dynamicsystems.com",
+  "MFAPhoneNumber": "+1234567890",
+  "revokedTokens": [],
+  "lastRefreshToken": null,
+  "roles": [
+    "User",
+    "Admin",
+    "Bootstrap"
+  ]
+}
