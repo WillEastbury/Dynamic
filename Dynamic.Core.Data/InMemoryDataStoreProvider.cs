@@ -9,7 +9,7 @@ namespace Dynamic.Core.Data;
     /// The provider implements IEnumerable&lt;T&gt; so that clients may use LINQ queries against it,
     /// and it transparently uses the underlying skiplist indexes.
     /// </summary>
-    public class InMemoryDataStoreProvider<T> : IDataStoreProvider<T>, IEnumerable<T> where T : IStorable, IComparable<T>
+    public class InMemoryDataStoreProvider<T> : IDataStoreProvider<T>, IEnumerable<T> where T : IStorable
     {
         // The primary data store for fast lookup by Id.
         private readonly Dictionary<string, T> _store = new Dictionary<string, T>();

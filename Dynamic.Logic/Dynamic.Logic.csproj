@@ -6,4 +6,8 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\Dynamic.Core.Data\Dynamic.Core.Data.csproj" />
+  </ItemGroup>
+
 </Project>

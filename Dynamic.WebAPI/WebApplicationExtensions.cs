@@ -7,11 +7,12 @@ using System.Reflection;
 
 public static class WebApplicationExtensions
 {
-
     public static void SetupDIModules(this IServiceCollection services)
     {
         services.AddSingleton<AuthConfigOptions>();
         services.AddSingleton<IDataStoreProvider<UserAccount>, InMemoryDataStoreProvider<UserAccount>>();
+        // Allow any IStorable to be stored and indexed. 
+        services.AddSingleton(typeof(IDataStoreProvider<>), typeof(InMemoryDataStoreProvider<>));
         services.AddSingleton<IAuthenticationProvider, TokenAuthenticationProvider>();
         services.AddHttpClient();
         services.AddLogging();
@@ -88,6 +89,118 @@ public static class WebApplicationExtensions
                 }
             }
         }
+    }
+    public static void SetupDataPlaneRoutes(this WebApplication app)
+    {
+        app.MapPost("/api/storage/{objectName}", async ([FromBody] IStorable data,[FromServices] IServiceProvider services, string objectName) =>
+        {
+            var providerType = typeof(IDataStoreProvider<>).MakeGenericType(Type.GetType(objectName)!);
+            dynamic dsp = services.GetRequiredService(providerType);
+
+            await dsp.CreateAsync(data);
+            return Results.Created($"/api/storage/{objectName}/{data.Id}", data);
+
+        });
+
+        app.MapGet("/api/storage/{objectName}/{id}", async (
+            string objectName,
+            string id,
+            [FromServices] IServiceProvider services) =>
+        {
+            var providerType = typeof(IDataStoreProvider<>).MakeGenericType(Type.GetType(objectName)!);
+            dynamic dsp = services.GetRequiredService(providerType);
+
+            var result = await dsp.ReadAsync(id);
+            return result is not null ? Results.Ok(result) : Results.NotFound();
+
+        });
+
+        app.MapGet("/api/storage/{objectName}", async (
+            string objectName,
+            [FromServices] IServiceProvider services) =>
+        {
+            var providerType = typeof(IDataStoreProvider<>).MakeGenericType(Type.GetType(objectName)!);
+            dynamic dsp = services.GetRequiredService(providerType);
+
+            var result = await dsp.ReadAllAsync();
+            return Results.Ok(result.Values);
+
+        });
+
+        app.MapPut("/api/storage/{objectName}/{id}", async (
+            [FromBody] IStorable updatedData,
+            string objectName,
+            string id,
+            [FromServices] IServiceProvider services) =>
+        {
+            var providerType = typeof(IDataStoreProvider<>).MakeGenericType(Type.GetType(objectName)!);
+            dynamic dsp = services.GetRequiredService(providerType);
+
+            if (!await dsp.ExistsAsync(id))
+            {
+                return Results.NotFound();
+            }
+
+            updatedData.Id = id;
+            await dsp.UpdateAsync(updatedData);
+            return Results.Ok(updatedData);
+
+        });
+
+        app.MapDelete("/api/storage/{objectName}/{id}", async (
+            string objectName,
+            string id,
+            [FromServices] IServiceProvider services) =>
+        {
+            var providerType = typeof(IDataStoreProvider<>).MakeGenericType(Type.GetType(objectName)!);
+            dynamic dsp = services.GetRequiredService(providerType);
+
+            if (!await dsp.ExistsAsync(id))
+            {
+                return Results.NotFound();
+            }
+
+            await dsp.DeleteAsync(id);
+            return Results.NoContent();
+
+        });
+
+        app.MapGet("/api/storage/{objectName}/paged", async (
+            string objectName,
+            int skipPages,
+            int pageSize,
+            [FromServices] IServiceProvider services) =>
+        {
+            var providerType = typeof(IDataStoreProvider<>).MakeGenericType(Type.GetType(objectName)!);
+            dynamic dsp = services.GetRequiredService(providerType);
+
+            var result = await dsp.ReadPagedAsync(skipPages, 1, pageSize);
+            return Results.Ok(result.Values);
+
+        });
+
+        app.MapGet("/api/storage/{objectName}/filter", async (
+            string objectName,
+            [FromQuery] string filterField,
+            [FromQuery] string filterValue,
+            [FromServices] IServiceProvider services) =>
+        {
+            var providerType = typeof(IDataStoreProvider<>).MakeGenericType(Type.GetType(objectName)!);
+            dynamic dsp = services.GetRequiredService(providerType);
+
+            Func<IStorable, bool> filter = item =>
+            {
+                var property = item.GetType().GetProperty(filterField);
+                if (property == null) return false;
+
+                var value = property.GetValue(item)?.ToString();
+                return value != null && value.Contains(filterValue, StringComparison.OrdinalIgnoreCase);
+            };
+
+            var filteredItems = await dsp.ReadAllFilteredAsync(filter);
+            return Results.Ok(filteredItems.Values);
+
+        });
     }
     public static void SetupAuthRoutes(this WebApplication app)
     {

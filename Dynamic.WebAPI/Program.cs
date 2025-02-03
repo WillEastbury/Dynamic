@@ -12,5 +12,6 @@ app.UseHttpsRedirection();
 app.UseStaticFiles();
 app.Use(WebApplicationExtensions.UseAuthMiddleware);
 app.SetupAuthRoutes();
+app.SetupDataPlaneRoutes();
 
 app.Run();
