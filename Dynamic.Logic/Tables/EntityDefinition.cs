@@ -1,4 +1,5 @@
-using Dynamic.Core.Data;
+using Dynamic.Core.Data.Interfaces;
+
 namespace Dynamic.Logic;
 public class EntityDefinition : IStorable
 {

@@ -2,16 +2,12 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-builder.Services.SetupDIModules();
+builder.Services.SetupDIModulesInMemory(); // Setup the DI modules for in-memory data store
 
 var app = builder.Build();
 app.UseSwagger();
 app.UseSwaggerUI();
 app.UseHttpsRedirection();
-
-app.UseStaticFiles();
 app.Use(WebApplicationExtensions.UseAuthMiddleware);
-app.SetupAuthRoutes();
 app.SetupDataPlaneRoutes();
-
 app.Run();

@@ -1,256 +1,210 @@
 using System.Collections;
+using System.Collections.Concurrent;
+using System.Linq;
 using System.Reflection;
 using System.Text.Json;
-using System.Linq; 
+using Dynamic.Core.Data.Interfaces;
+
 namespace Dynamic.Core.Data;
 
     /// <summary>
-    /// An in‑memory data store provider that maintains one skiplist index per public property of T.
-    /// The provider implements IEnumerable&lt;T&gt; so that clients may use LINQ queries against it,
-    /// and it transparently uses the underlying skiplist indexes.
+    /// InMemoryDataStoreProvider is a simple in-memory data store provider that implements the IDataStoreProvider interface.
+    /// /// It uses a ConcurrentDictionary to store items and provides methods for creating, reading, updating, and deleting items.
+    /// /// It also supports filtering and pagination of items.
     /// </summary>
+    /// <typeparam name="T">The type of items stored in the data store. Must implement IStorable.</typeparam>
+    /// <remarks>
+    /// This class is thread-safe. But it is not suitable for production use as it does not persist data to disk.
+    /// </remarks>
+    /// 
     public class InMemoryDataStoreProvider<T> : IDataStoreProvider<T>, IEnumerable<T> where T : IStorable
     {
-        // The primary data store for fast lookup by Id.
-        private readonly Dictionary<string, T> _store = new Dictionary<string, T>();
+        private readonly ConcurrentDictionary<string, T> _store = new (); // A dictionary to store items by their Id.
+    
+        private readonly List<LogEntry<T>> _logs = new();     // A list to store logs of items created.
 
-        // Log storage (unchanged from your original code).
-        private readonly Dictionary<string, List<T>> _logs = new Dictionary<string, List<T>>();
+        private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, object>> _idIndexes = new(); // A dictionary that holds an index for each public property of T.
 
-        // A dictionary that holds an index (skiplist) for each public property of T.
-        private readonly Dictionary<string, LockFreeIndexedSkipList<string>> _idIndexes = new Dictionary<string, LockFreeIndexedSkipList<string>>();
-        // We also store the corresponding PropertyInfo for each property so we can read the value.
-        private readonly Dictionary<string, PropertyInfo> _indexedProperties = new Dictionary<string, PropertyInfo>();
-
-        // A delimiter used in composite keys (used for non-Id properties).
-        private const string CompositeKeyDelimiter = "||";
+        private readonly Dictionary<string, PropertyInfo> _indexedProperties = new Dictionary<string, PropertyInfo>();  // We also store the corresponding PropertyInfo for each property so we can read the value.
+        private const string CompositeKeyDelimiter = "||"; // A delimiter used in composite keys (used for non-Id properties).
 
         public InMemoryDataStoreProvider()
         {
-            // Reflect over the public properties of T.
+            // Reflect over the public properties of T and create the appropriate dictionaries for each one.
             var properties = typeof(T).GetProperties(BindingFlags.Public | BindingFlags.Instance);
             foreach (var prop in properties)
             {
                 // Optionally, you might filter here to only index a subset.
                 _indexedProperties[prop.Name] = prop;
-                _idIndexes[prop.Name] = new LockFreeIndexedSkipList<string>();
+                _idIndexes[prop.Name] = new ConcurrentDictionary<string, object>();
             }
         }
 
-        public Task AppendToLogAsync(T item, string LogId)
+        public async Task AppendToLogAsync(LogType log, T item, bool WaitForHarden = false, string userId = "System")
         {
-            if (!_logs.ContainsKey(LogId))
+            LogEntry<T> logEntry = new LogEntry<T> { LogType = log, Item = item, Timestamp = DateTime.UtcNow, UserId = userId };
+            _logs.Add(logEntry);
+            if(WaitForHarden)
             {
-                _logs[LogId] = new List<T>();
+                await HardenCheck(logEntry);
             }
-            _logs[LogId].Add(item);
-            return Task.CompletedTask;
         }
 
-        public Task<T> CreateAsync(T item)
+        private static async Task HardenCheck(LogEntry<T> logEntry)
         {
-            // Generate and assign a new Id.
-            item.Id = Guid.NewGuid().ToString();
-            _store[item.Id] = item;
-            // Update all indexes with the new item.
-            foreach (var kvp in _indexedProperties)
+            while (!logEntry.IsHardened)
             {
-                string propName = kvp.Key;
-                string compositeKey = CreateCompositeKey(propName, item);
-                _idIndexes[propName].Insert(compositeKey);
+                // Wait for the item to be hardened
+                await Task.Delay(100); // Wait for 100ms before checking again
             }
-            return Task.FromResult(item);
         }
-
-        public Task<T?> ReadAsync(string Id)
+        private async Task HardenTraverse(string Id)
         {
-            _store.TryGetValue(Id, out T? item);
-            return Task.FromResult(item);
-        }
-
-        public Task<Dictionary<string, T>> ReadAllAsync() => Task.FromResult(_store);
-
-        public Task<Dictionary<string, T>> ReadPagedAsync(int SkipPages, int Pages, int PageSize)
-        {
-            var pagedItems = _store.Values
-                                   .Skip(SkipPages * PageSize)
-                                   .Take(Pages * PageSize)
-                                   .ToDictionary(x => x.Id, x => x);
-            return Task.FromResult(pagedItems);
-        }
-
-        public Task<Dictionary<string, T>> ReadAllFilteredAsync(Func<T, bool> filter)
-        {
-            // Here we use a default index (for example, the "Id" index if available; otherwise, the first index).
-            string defaultIndex = _indexedProperties.ContainsKey("Id") ? "Id" : _indexedProperties.Keys.First();
-            var result = new Dictionary<string, T>();
-            foreach (var compositeKey in _idIndexes[defaultIndex])
+            // Find the correct log entry for the last CUD operation on the item.
+            LogEntry<T>? logEntry = _logs.LastOrDefault(x => x.Item.Id == Id && (x.LogType == LogType.Create || x.LogType == LogType.Update || x.LogType == LogType.Delete));
+            while (!logEntry.IsHardened && logEntry != null)
             {
-                string id = ExtractIdFromCompositeKey(defaultIndex, compositeKey);
-                if (_store.TryGetValue(id, out var item) && filter(item))
-                {
-                    result[id] = item;
-                }
+                // Wait for the item to be hardened
+                await Task.Delay(100); // Wait for 100ms before checking again
             }
-            return Task.FromResult(result);
-        }
+}
 
-        public Task<Dictionary<string, T>> ReadPagedFilteredAsync(Func<T, bool> filter, int SkipPages, int Pages, int PageSize)
+        public async Task CreateAsync(T item, bool waitForHarden = false, string userId = "System")
         {
-            string defaultIndex = _indexedProperties.ContainsKey("Id") ? "Id" : _indexedProperties.Keys.First();
-            var filtered = _idIndexes[defaultIndex]
-                .Select(compositeKey => ExtractIdFromCompositeKey(defaultIndex, compositeKey))
-                .Where(id => _store.ContainsKey(id) && filter(_store[id]))
-                .Skip(SkipPages * PageSize)
-                .Take(Pages * PageSize)
-                .Select(id => _store[id])
-                .ToDictionary(item => item.Id, item => item);
-            return Task.FromResult(filtered);
-        }
+            if (item == null) throw new ArgumentNullException(nameof(item));
+            if (! string.IsNullOrEmpty(item.Id)) throw new ArgumentException("Item Id MUST be null or empty.", nameof(item));
 
-        public Task UpdateAsync(T item)
-        {
-            if (_store.ContainsKey(item.Id))
+            item.Id = Guid.NewGuid().ToString(); // Generate a new Id for the item.
+            _store[item.Id] = item; // Add the item to the store.
+            await AppendToLogAsync(LogType.Create, item, waitForHarden, userId); // Log the item creation.
+
+            // Index the item by its properties.
+            foreach (var prop in _indexedProperties)
             {
-                // Remove the item’s old index entries...
-                RemoveIndexesForItem(item);
-                // Update the store.
-                _store[item.Id] = item;
-                // ...and re-add the indexes for the updated item.
-                AddIndexesForItem(item);
-            }
-            return Task.CompletedTask;
-        }
-
-        public Task DeleteAsync(string Id)
-        {
-            if (_store.TryGetValue(Id, out var item))
-            {
-                RemoveIndexesForItem(item);
-                _store.Remove(Id);
-            }
-            return Task.CompletedTask;
-        }
-
-        public Task<bool> ExistsAsync(string Id) => Task.FromResult(_store.ContainsKey(Id));
-
-        public Task<bool> ChangedAsync(T item)
-        {
-            if (_store.TryGetValue(item.Id, out var storedItem))
-            {
-                string storedJson = JsonSerializer.Serialize(storedItem);
-                string itemJson = JsonSerializer.Serialize(item);
-                return Task.FromResult(storedJson != itemJson);
-            }
-            return Task.FromResult(false);
-        }
-
-        // Create a composite key for a given property.
-        // For the "Id" property the key is simply the Id.
-        // For any other property, we combine its value and the Id.
-        private string CreateCompositeKey(string propertyName, T item)
-        {
-            if (!_indexedProperties.TryGetValue(propertyName, out var propInfo))
-                throw new Exception($"Property {propertyName} is not indexed.");
-
-            if (propertyName == "Id")
-                return item.Id;
-
-            var value = propInfo.GetValue(item)?.ToString() ?? string.Empty;
-            return $"{value}{CompositeKeyDelimiter}{item.Id}";
-        }
-
-        // Extract the item Id from a composite key.
-        private string ExtractIdFromCompositeKey(string propertyName, string compositeKey)
-        {
-            if (propertyName == "Id")
-                return compositeKey;
-
-            var parts = compositeKey.Split(new string[] { CompositeKeyDelimiter }, StringSplitOptions.None);
-            return parts.Length > 1 ? parts[1] : compositeKey;
-        }
-
-        private void RemoveIndexesForItem(T item)
-        {
-            foreach (var propName in _indexedProperties.Keys)
-            {
-                string compositeKey = CreateCompositeKey(propName, item);
-                _idIndexes[propName].Remove(compositeKey);
+                var value = prop.Value.GetValue(item)?.ToString() ?? string.Empty;
+                _idIndexes[prop.Key][value] = item.Id;
             }
         }
 
-        private void AddIndexesForItem(T item)
-        {
-            foreach (var propName in _indexedProperties.Keys)
-            {
-                string compositeKey = CreateCompositeKey(propName, item);
-                _idIndexes[propName].Insert(compositeKey);
-            }
-        }
-
-        // The provider implements IEnumerable<T> so that clients can query it via LINQ.
-        // Here we use a default index (the "Id" index if available, otherwise the first defined index)
-        // to yield items in sorted order.
         public IEnumerator<T> GetEnumerator()
         {
-            string defaultIndex = _indexedProperties.ContainsKey("Id") ? "Id" : _indexedProperties.Keys.First();
-            foreach (var compositeKey in _idIndexes[defaultIndex])
-            {
-                string id = ExtractIdFromCompositeKey(defaultIndex, compositeKey);
-                if (_store.TryGetValue(id, out var item))
-                {
-                    yield return item;
-                }
-            }
+            return _store.Values.GetEnumerator();
         }
 
-        /// <summary>
-        /// Allows querying on a specific indexed property.
-        /// For example, to query on the "Name" property, pass in "Name" along with a predicate on the property value.
-        /// </summary>
-        public IEnumerable<T> QueryByIndex(string propertyName, Func<string, bool> predicate)
+        IEnumerator IEnumerable.GetEnumerator()
         {
-            if (!_idIndexes.ContainsKey(propertyName))
-                throw new ArgumentException($"Index for property {propertyName} does not exist.");
-
-            foreach (var compositeKey in _idIndexes[propertyName])
-            {
-                string propertyValue;
-                string id;
-                if (propertyName == "Id")
-                {
-                    propertyValue = compositeKey;
-                    id = compositeKey;
-                }
-                else
-                {
-                    var parts = compositeKey.Split(new string[] { CompositeKeyDelimiter }, StringSplitOptions.None);
-                    propertyValue = parts[0];
-                    id = parts.Length > 1 ? parts[1] : compositeKey;
-                }
-                if (predicate(propertyValue) && _store.ContainsKey(id))
-                {
-                    yield return _store[id];
-                }
-            }
+            return GetEnumerator();
         }
 
-    Task IDataStoreProvider<T>.CreateAsync(T item)
+    public async Task<T?> ReadAsync(string Id, bool waitForHarden)
     {
-        return CreateAsync(item);
+        if (string.IsNullOrEmpty(Id)) throw new ArgumentNullException(nameof(Id));
+        if (waitForHarden)
+        {
+            await HardenTraverse(Id);
+        }
+        if (_store.TryGetValue(Id, out T? item))
+        {
+            return item;
+        }
+        return default; // Return null if the item is not found.
     }
 
-    IEnumerator IEnumerable.GetEnumerator()
+    public Task<Dictionary<string, T>> ReadAllAsync()
     {
-        string defaultIndex = _indexedProperties.ContainsKey("Id") ? "Id" : _indexedProperties.Keys.First();
-            foreach (var compositeKey in _idIndexes[defaultIndex])
+        return Task.FromResult(_store.ToDictionary(kvp => kvp.Key, kvp => kvp.Value));
+    }
+
+    public Task<Dictionary<string, T>> ReadPagedAsync(int SkipPages, int Pages, int PageSize)
+    {
+        if (SkipPages < 0) throw new ArgumentOutOfRangeException(nameof(SkipPages), "SkipPages cannot be negative.");
+        if (Pages < 0) throw new ArgumentOutOfRangeException(nameof(Pages), "Pages cannot be negative.");
+        if (PageSize <= 0) throw new ArgumentOutOfRangeException(nameof(PageSize), "PageSize must be greater than zero.");
+
+        return Task.FromResult(_store.Skip(SkipPages * PageSize).Take(Pages * PageSize).ToDictionary(kvp => kvp.Key, kvp => kvp.Value));
+        
+    }
+
+    public async Task<Dictionary<string, T>> ReadAllFilteredAsync(Func<T, bool> filter)
+    {
+        // ToDo: Update to include filters by indexed properties.
+        if (filter == null) throw new ArgumentNullException(nameof(filter));
+        var outy = await ReadAllAsync();
+        return outy.Where(kvp => filter(kvp.Value)).ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+    }
+
+    public Task<Dictionary<string, T>> ReadPagedFilteredAsync(Func<T, bool> filter, int SkipPages, int Pages, int PageSize)
+    {
+        // Todo: Update to include filters by indexed properties.
+        if (filter == null) throw new ArgumentNullException(nameof(filter));
+        if (SkipPages < 0) throw new ArgumentOutOfRangeException(nameof(SkipPages), "SkipPages cannot be negative.");
+        if (Pages < 0) throw new ArgumentOutOfRangeException(nameof(Pages), "Pages cannot be negative.");
+        if (PageSize <= 0) throw new ArgumentOutOfRangeException(nameof(PageSize), "PageSize must be greater than zero.");
+
+        return Task.FromResult(_store.Where(kvp => filter(kvp.Value)).Skip(SkipPages * PageSize).Take(Pages * PageSize).ToDictionary(kvp => kvp.Key, kvp => kvp.Value));
+
+    }
+
+    public async Task UpdateAsync(T item, bool WaitForHarden, string userId)
+    {
+        // Update the item in the store.
+        if (item == null) throw new ArgumentNullException(nameof(item));
+        if (string.IsNullOrEmpty(item.Id)) throw new ArgumentException("Item Id cannot be null or empty.", nameof(item));
+
+        if (_store.TryGetValue(item.Id, out T? existingItem))
+        {
+            _store[item.Id] = item; // Update the item in the store.
+            await AppendToLogAsync(LogType.Update, item, WaitForHarden, userId); // Log the item update.
+
+            // Re-index the item by its properties.
+            foreach (var prop in _indexedProperties)
             {
-                string id = ExtractIdFromCompositeKey(defaultIndex, compositeKey);
-                if (_store.TryGetValue(id, out var item))
-                {
-                    yield return item;
-                }
+                var value = prop.Value.GetValue(item)?.ToString() ?? string.Empty;
+                _idIndexes[prop.Key][value] = item.Id;
             }
+        }
+        else
+        {
+            throw new KeyNotFoundException($"Item with Id {item.Id} not found.");
+        }
+    }
+    public async Task DeleteAsync(string Id, bool WaitForHarden = false, string userId = "System")
+    {
+        if (Id == null || Id == "") throw new ArgumentNullException(nameof(Id));
+        if (WaitForHarden)
+        {
+            await HardenTraverse(Id); // Wait for the item to be hardened.
+        }
+        await AppendToLogAsync(LogType.Delete, _store[Id], WaitForHarden, userId); // Log the item deletion.
+        if (_store.TryRemove(Id, out T? item))
+        {
+            // Remove the item from the store then kill the indexes
+            foreach (var prop in _indexedProperties)
+            {
+                var value = prop.Value.GetValue(item)?.ToString() ?? string.Empty;
+                _idIndexes[prop.Key].TryRemove(value, out _); // Remove the index entry for the property.
+            }
+        }
+        else
+        {
+            throw new KeyNotFoundException($"Item with Id {Id} not found.");
+        }
     }
 
+    public Task<bool> ExistsAsync(string Id, bool WaitForHarden)
+    {
+        return Task.FromResult(_store.ContainsKey(Id));
+    }
+
+    public Task<bool> ChangedAsync(T item, bool WaitForHarden)
+    {
+        if (item == null) throw new ArgumentNullException(nameof(item));
+        if (string.IsNullOrEmpty(item.Id)) throw new ArgumentException("Item Id cannot be null or empty.", nameof(item));
+
+        if (_store.TryGetValue(item.Id, out T? existingItem))
+        {
+            return Task.FromResult(!JsonSerializer.Serialize(existingItem).Equals(JsonSerializer.Serialize(item)));
+        }
+        return Task.FromResult(false); // Return false if the item is not found.
+    }
 }

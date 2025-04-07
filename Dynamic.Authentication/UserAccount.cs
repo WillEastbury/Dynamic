@@ -1,5 +1,4 @@
-﻿using Dynamic.Core;
-using Dynamic.Core.Data;
+﻿using Dynamic.Core.Data.Interfaces;
 namespace Dynamic.Core.Authentication
 {
     public class UserAccount : IStorable
@@ -11,7 +10,6 @@ namespace Dynamic.Core.Authentication
         public DateTime ValidFrom { get; set; } = DateTime.Now;
         public required string FullName { get; set; }
         public PrincipalType principalType { get; set; } = PrincipalType.User;
-
         public int FailedLoginAttempts { get; set; } = 0;
         public DateTime LastSuccessfulLogin { get; set; } = DateTime.MinValue;
         public byte[] Salt { get; set; } = Guid.NewGuid().ToByteArray();

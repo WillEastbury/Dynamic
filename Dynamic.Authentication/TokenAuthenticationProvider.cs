@@ -2,6 +2,7 @@
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text;
+using Dynamic.Core.Data.Interfaces;
 
 namespace Dynamic.Core.Authentication
 {
@@ -102,7 +103,7 @@ namespace Dynamic.Core.Authentication
         {
             if (newPassword == null) return false;
 
-            UserAccount? me = await _UserAccountStoreProvider.ReadAsync(id);
+            UserAccount? me = await _UserAccountStoreProvider.ReadAsync(id, true);
 
             if (me == null) return false;
 
@@ -127,20 +128,20 @@ namespace Dynamic.Core.Authentication
         public async Task<int> CheckFailedLogins(string id)
         {
             if (id == null) return 99999;
-            UserAccount? me = await _UserAccountStoreProvider.ReadAsync(id);
+            UserAccount? me = await _UserAccountStoreProvider.ReadAsync(id,true);
             if (me == null) return 99999;
             return me.FailedLoginAttempts;
         }
 
         public async Task<UserAccount> CreateUser(UserAccount user)
         {
-            await _UserAccountStoreProvider.CreateAsync(user);
+            await _UserAccountStoreProvider.CreateAsync(user, true, "System");
             return user;
         }
 
         public async Task DeleteUser(string id)
         {
-            await _UserAccountStoreProvider.DeleteAsync(id);
+            await _UserAccountStoreProvider.DeleteAsync(id, true, "System");
         }
 
         public async Task<string?> GenerateAuthTokenAsync(string id, string password, string TargetApplication = "nothing", string Purpose = "AuthN", string SourceApplication = "nothing")
@@ -155,7 +156,7 @@ namespace Dynamic.Core.Authentication
             }
 
             // Store the account
-            await _UserAccountStoreProvider.UpdateAsync(me);
+            await _UserAccountStoreProvider.UpdateAsync(me, true, "System");
 
             // all good, generate a token
             return GenerateToken(new()
@@ -177,7 +178,7 @@ namespace Dynamic.Core.Authentication
         private async Task<UserAccount?> CheckNullAndRetrieveUserById(string id)
         {
             if (id == null || id == "") return null;
-            UserAccount? me = await _UserAccountStoreProvider.ReadAsync(id);
+            UserAccount? me = await _UserAccountStoreProvider.ReadAsync(id, true);
             return me;
         }
 
@@ -209,10 +210,13 @@ namespace Dynamic.Core.Authentication
 
         public async Task<UserAccount> UpdateUser(UserAccount user)
         {
-            await _UserAccountStoreProvider.UpdateAsync(user);
+            await _UserAccountStoreProvider.UpdateAsync(user, true, "System");
             return user;
         }
 
-
+        public Task<bool> ApplyLoginConditions(string id, List<LoginCondition> conditions)
+        {
+            throw new NotImplementedException();
+        }
     }
 }

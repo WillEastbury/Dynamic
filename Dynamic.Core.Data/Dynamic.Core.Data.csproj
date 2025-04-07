@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Dynamic.Core\Dynamic.Core.Utilities.csproj" />
+    <ProjectReference Include="..\Dynamic.Core.Interfaces\Dynamic.Core.Interfaces.csproj" />
   </ItemGroup>
 
 </Project>
